@@ -17,19 +17,20 @@ LETTERS = ['а', 'б', 'в', 'г', 'д', 'е', 'ж', 'з', 'и', 'к']
 # ======================
 def format_board(board: list, hide_ships: bool = False) -> str:
     """Форматирует доску в текстовый вид"""
-    header = "  " + " ".join(str(i) for i in range(10)) + "\n"
+    # Заголовок с цифрами от 1 до 10
+    header = "    " + "   ".join(str(i) for i in range(1, 11)) + "\n"
     board_text = header
-    
+
     for y in range(10):
-        row = [LETTERS[y]]  # Буква для строки
+        row = [f"{LETTERS[y]} "]  # Буква для строки с пробелом
         for x in range(10):
             cell = board[y][x]
             if hide_ships and cell == "🛳️":
-                row.append("🌊")
+                row.append("🌊 ")
             else:
-                row.append(cell)
+                row.append(f"{cell} ")
         board_text += " ".join(row) + "\n"
-    
+
     return f"<pre>{board_text}</pre>"
 
 async def send_boards(chat_id: int, game: Game, is_player1: bool):
@@ -147,11 +148,11 @@ async def join_game(message: Message):
 # ======================
 # Обработчики ходов
 # ======================
-@router.message(F.text.regexp(r'^[а-икА-ИК]\s*[0-9]$'))
+@router.message(F.text.regexp(r'^[а-икА-ИК]\s*[1-9]|10$'))
 async def process_shot(message: Message):
     user_id = message.from_user.id
     chat_id = message.chat.id
-    
+
     # Находим игру
     game_data = None
     for gid, data in active_games.items():
@@ -159,27 +160,27 @@ async def process_shot(message: Message):
             game_data = data
             game_id = gid
             break
-    
+
     if not game_data:
         await message.answer("Вы не в игре! Создайте /play или присоединитесь /join")
         return
-    
+
     game = game_data["game"]
-    
+
     if user_id != game.current_turn:
         await message.answer("Сейчас не ваш ход!")
         return
-    
+
     # Парсим координаты (приводим букву к нижнему регистру)
     letter_part, num_part = message.text.lower().split()
     y = LETTERS.index(letter_part[0])  # Берем первый символ на случай лишних пробелов
-    x = int(num_part)
-    
+    x = int(num_part) - 1  # Корректируем индекс на 1
+
     # Проверяем координаты
     if not (0 <= x <= 9) or not (0 <= y <= 9):
-        await message.answer("Координаты вне диапазона! Используйте буквы а-и и цифры 0-9")
+        await message.answer("Координаты вне диапазона! Используйте буквы а-и и цифры 1-10")
         return
-    
+
     # Определяем параметры выстрела
     if user_id == game.player1:
         target_board = game.player2_board
@@ -191,22 +192,22 @@ async def process_shot(message: Message):
         shots = game.player2_shots
         opponent_chat = game_data["player1_chat"]
         opponent_id = game_data["player1"]
-    
+
     # Проверяем повторный выстрел
     if (x, y) in shots:
         await message.answer("Вы уже стреляли сюда!")
         return
-    
+
     # Обрабатываем выстрел
     shots.add((x, y))
     if target_board[y][x] == "🛳️":
         target_board[y][x] = "💥"
         result = "Попадание! 🔥"
-        
+
         # Проверяем, убит ли корабль
         if check_ship_sunk(target_board, x, y):
             result += "\nКорабль уничтожен! 💀"
-        
+
         # Ход остается у текущего игрока
         keep_turn = True
     else:
@@ -214,7 +215,7 @@ async def process_shot(message: Message):
         result = "Мимо! 🌊"
         # Ход переходит противнику
         keep_turn = False
-    
+
     # Проверяем победу
     if game.check_win(target_board):
         winner_name = message.from_user.first_name
@@ -228,18 +229,18 @@ async def process_shot(message: Message):
         )
         del active_games[game_id]
         return
-    
+
     # Меняем ход (если нужно)
     if not keep_turn:
         game.current_turn = opponent_id
-    
+
     # Отправляем обновленные доски
     await send_boards(chat_id, game, is_player1=(user_id == game.player1))
     await send_boards(opponent_chat, game, is_player1=(opponent_id == game.player1))
-    
+
     # Уведомляем о результате
     await message.answer(result)
-    
+
     if not keep_turn:
         await bot.send_message(
             opponent_chat,
