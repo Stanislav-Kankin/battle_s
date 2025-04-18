@@ -1,45 +1,74 @@
 from aiogram import F, Router
-from aiogram.types import Message, CallbackQuery
+from aiogram.types import Message
 from aiogram.filters import Command
-from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from models import Game
 from config import bot
-import keyboards as kb
 
 router = Router()
-active_games = {}  # {chat_id: {"status": str, "player1": int, "player2": int, "game": Game}}
+waiting_games = {}  # {player1_id: {"chat_id": chat_id}}
+active_games = {}   # {game_id: {"player1": id, "player2": id, "game": Game}}
+
+# Соответствие букв цифрам (а=0, б=1, ...)
+LETTERS = ['а', 'б', 'в', 'г', 'д', 'е', 'ж', 'з', 'и', 'к']
 
 # ======================
 # Вспомогательные функции
 # ======================
-async def show_board(chat_id: int, board: list, is_hidden: bool = False):
-    """Отображает доску с inline-кнопками"""
-    builder = InlineKeyboardBuilder()
+def format_board(board: list, hide_ships: bool = False) -> str:
+    """Форматирует доску в текстовый вид"""
+    header = "  " + " ".join(str(i) for i in range(10)) + "\n"
+    board_text = header
     
     for y in range(10):
+        row = [LETTERS[y]]  # Буква для строки
         for x in range(10):
             cell = board[y][x]
-            if is_hidden and cell == "🛳️":
-                display = "🌊"
+            if hide_ships and cell == "🛳️":
+                row.append("🌊")
             else:
-                display = cell
-                
-            builder.button(
-                text=display,
-                callback_data=f"shoot_{x}_{y}"
-            )
-    builder.adjust(10)  # 10 кнопок в ряд
+                row.append(cell)
+        board_text += " ".join(row) + "\n"
     
-    board_text = "  0 1 2 3 4 5 6 7 8 9\n"
-    for y in range(10):
-        board_text += f"{y} " + " ".join([cell if not is_hidden or cell in ("💥", "❌") else "🌊" for cell in board[y]]) + "\n"
+    return f"<pre>{board_text}</pre>"
+
+async def send_boards(chat_id: int, game: Game, is_player1: bool):
+    """Отправляет обе доски игроку"""
+    # Своя доска (полная)
+    my_board = game.player1_board if is_player1 else game.player2_board
+    await bot.send_message(chat_id, "⚓ Ваши корабли:\n" + format_board(my_board))
     
+    # Доска противника (скрытая)
+    enemy_board = game.player2_board if is_player1 else game.player1_board
+    await bot.send_message(chat_id, "🎯 Доска противника:\n" + format_board(enemy_board, hide_ships=True))
+    
+    # Подсказка по вводу
     await bot.send_message(
         chat_id,
-        f"<pre>{board_text}</pre>",
-        reply_markup=builder.as_markup()
+        "Ваш ход! Введите координаты в формате <b>буква цифра</b> (например, 'а 1' или 'в 5')"
     )
+
+def check_ship_sunk(board: list, x: int, y: int) -> bool:
+    """Проверяет, полностью ли уничтожен корабль"""
+    # Проверяем все клетки вокруг, чтобы найти весь корабль
+    directions = [(0, 1), (1, 0), (0, -1), (-1, 0)]
+    ship_cells = []
+    to_check = [(x, y)]
+    
+    while to_check:
+        cx, cy = to_check.pop()
+        if (cx, cy) in ship_cells:
+            continue
+        ship_cells.append((cx, cy))
+        
+        for dx, dy in directions:
+            nx, ny = cx + dx, cy + dy
+            if 0 <= nx < 10 and 0 <= ny < 10:
+                if board[ny][nx] in ("🛳️", "💥") and (nx, ny) not in ship_cells:
+                    to_check.append((nx, ny))
+    
+    # Если все клетки корабля подбиты
+    return all(board[cy][cx] == "💥" for cx, cy in ship_cells)
 
 # ======================
 # Обработчики команд
@@ -50,8 +79,12 @@ async def start(message: Message):
         "🚢 Добро пожаловать в Морской бой!\n\n"
         "Команды:\n"
         "/play - создать игру\n"
-        "/join - присоединиться к игре",
-        reply_markup=kb.get_main_menu()
+        "/join <ID> - присоединиться к игре\n\n"
+        "Как играть:\n"
+        "1. Первый игрок создает игру командой /play\n"
+        "2. Второй игрок присоединяется командой /join <ID>\n"
+        "3. По очереди вводите координаты (например, 'а 1' или 'в 5')\n"
+        "4. При попадании ход остается, при промахе - переходит"
     )
 
 @router.message(Command("play"))
@@ -59,117 +92,158 @@ async def play(message: Message):
     user_id = message.from_user.id
     chat_id = message.chat.id
     
-    # Проверяем, не участвует ли уже пользователь в другой игре
-    for game_data in active_games.values():
-        if user_id in (game_data.get("player1"), game_data.get("player2")):
-            await message.answer("Вы уже участвуете в другой игре!")
-            return
-    
-    if chat_id in active_games:
-        await message.answer("В этом чате уже есть активная игра!")
+    if user_id in waiting_games or any(user_id in (g["player1"], g["player2"]) for g in active_games.values()):
+        await message.answer("Вы уже участвуете в другой игре!")
         return
     
-    active_games[chat_id] = {
-        "status": "waiting",
-        "player1": user_id,
-        "player2": None
-    }
+    waiting_games[user_id] = {"chat_id": chat_id}
     await message.answer(
-        "Игра создана! Ожидаем второго игрока...\n"
-        "Пусть второй игрок напишет /join",
-        reply_markup=kb.get_main_menu()
+        f"Игра создана! Ваш ID игры: <code>{user_id}</code>\n\n"
+        "Сообщите этот ID второму игроку для присоединения:\n"
+        f"/join {user_id}"
     )
 
 @router.message(Command("join"))
 async def join_game(message: Message):
-    chat_id = message.chat.id
-    user_id = message.from_user.id
-    
-    if chat_id not in active_games:
-        await message.answer("В этом чате нет игр для присоединения!")
+    try:
+        game_id = int(message.text.split()[1])
+    except (IndexError, ValueError):
+        await message.answer("Используйте: /join <ID_игры>")
         return
     
-    game_data = active_games[chat_id]
-    
-    if game_data["status"] != "waiting":
-        await message.answer("Игра уже началась!")
+    if game_id not in waiting_games:
+        await message.answer("Игра не найдена или уже началась!")
         return
     
-    if user_id == game_data["player1"]:
-        await message.answer("Вы не можете играть сами с собой!")
-        return
+    player1_id = game_id
+    player2_id = message.from_user.id
+    player1_chat = waiting_games[game_id]["chat_id"]
+    player2_chat = message.chat.id
     
-    game_data["player2"] = user_id
-    game_data["status"] = "playing"
-    game_data["game"] = Game(game_data["player1"], user_id)
+    # Создаем игру
+    game = Game(player1_id, player2_id)
+    game_id = f"{player1_id}_{player2_id}"
+    active_games[game_id] = {
+        "player1": player1_id,
+        "player2": player2_id,
+        "player1_chat": player1_chat,
+        "player2_chat": player2_chat,
+        "game": game
+    }
     
-    await message.answer("Игра началась! Делайте ходы, нажимая на клетки.")
+    del waiting_games[player1_id]
     
-    # Показываем доски
-    game = game_data["game"]
-    await show_board(chat_id, game.player1_board, is_hidden=False)  # Своя доска
-    await show_board(chat_id, game.player2_board, is_hidden=True)   # Доска противника
+    # Оповещаем игроков
+    await bot.send_message(
+        player1_chat,
+        f"Игрок {message.from_user.first_name} присоединился!\n"
+        "Игра началась. Ваш ход первый."
+    )
+    await message.answer("Вы присоединились к игре! Ожидайте своего хода.")
+    
+    # Отправляем доски
+    await send_boards(player1_chat, game, is_player1=True)
 
 # ======================
-# Обработчики callback'ов
+# Обработчики ходов
 # ======================
-@router.callback_query(F.data.startswith("shoot_"))
-async def process_shoot(callback: CallbackQuery):
-    chat_id = callback.message.chat.id
-    user_id = callback.from_user.id
+@router.message(F.text.regexp(r'^[а-икА-ИК]\s*[0-9]$'))
+async def process_shot(message: Message):
+    user_id = message.from_user.id
+    chat_id = message.chat.id
     
-    if chat_id not in active_games or active_games[chat_id]["status"] != "playing":
-        await callback.answer("Игра не активна!", show_alert=True)
+    # Находим игру
+    game_data = None
+    for gid, data in active_games.items():
+        if user_id in (data["player1"], data["player2"]):
+            game_data = data
+            game_id = gid
+            break
+    
+    if not game_data:
+        await message.answer("Вы не в игре! Создайте /play или присоединитесь /join")
         return
     
-    game_data = active_games[chat_id]
     game = game_data["game"]
     
-    if user_id not in (game.player1, game.player2):
-        await callback.answer("Вы не участник этой игры!", show_alert=True)
-        return
-    
     if user_id != game.current_turn:
-        await callback.answer("Сейчас не ваш ход!", show_alert=True)
+        await message.answer("Сейчас не ваш ход!")
         return
     
-    _, x, y = callback.data.split("_")
-    x, y = int(x), int(y)
+    # Парсим координаты (приводим букву к нижнему регистру)
+    letter_part, num_part = message.text.lower().split()
+    y = LETTERS.index(letter_part[0])  # Берем первый символ на случай лишних пробелов
+    x = int(num_part)
     
-    # Определяем, в какую доску стреляем
+    # Проверяем координаты
+    if not (0 <= x <= 9) or not (0 <= y <= 9):
+        await message.answer("Координаты вне диапазона! Используйте буквы а-и и цифры 0-9")
+        return
+    
+    # Определяем параметры выстрела
     if user_id == game.player1:
         target_board = game.player2_board
         shots = game.player1_shots
+        opponent_chat = game_data["player2_chat"]
+        opponent_id = game_data["player2"]
     else:
         target_board = game.player1_board
         shots = game.player2_shots
+        opponent_chat = game_data["player1_chat"]
+        opponent_id = game_data["player1"]
     
-    # Проверяем, не стреляли ли уже сюда
+    # Проверяем повторный выстрел
     if (x, y) in shots:
-        await callback.answer("Вы уже стреляли сюда!", show_alert=True)
+        await message.answer("Вы уже стреляли сюда!")
         return
     
     # Обрабатываем выстрел
     shots.add((x, y))
     if target_board[y][x] == "🛳️":
         target_board[y][x] = "💥"
-        await callback.answer("Попадание! 🔥")
+        result = "Попадание! 🔥"
+        
+        # Проверяем, убит ли корабль
+        if check_ship_sunk(target_board, x, y):
+            result += "\nКорабль уничтожен! 💀"
+        
+        # Ход остается у текущего игрока
+        keep_turn = True
     else:
         target_board[y][x] = "❌"
-        await callback.answer("Мимо! 🌊")
+        result = "Мимо! 🌊"
+        # Ход переходит противнику
+        keep_turn = False
     
     # Проверяем победу
     if game.check_win(target_board):
-        winner_name = callback.from_user.first_name
-        await callback.message.answer(f"🎉 {winner_name} победил в этой игре!")
-        del active_games[chat_id]
+        winner_name = message.from_user.first_name
+        await bot.send_message(
+            game_data["player1_chat"],
+            f"🎉 {winner_name} победил в этой игре!"
+        )
+        await bot.send_message(
+            game_data["player2_chat"],
+            f"🎉 {winner_name} победил в этой игре!"
+        )
+        del active_games[game_id]
         return
     
-    # Меняем ход
-    game.current_turn = game.player2 if user_id == game.player1 else game.player1
+    # Меняем ход (если нужно)
+    if not keep_turn:
+        game.current_turn = opponent_id
     
-    # Обновляем сообщение с доской
-    await callback.message.edit_reply_markup(
-        reply_markup=InlineKeyboardBuilder().as_markup()
-    )
-    await show_board(chat_id, target_board, is_hidden=(user_id == game.player1))
+    # Отправляем обновленные доски
+    await send_boards(chat_id, game, is_player1=(user_id == game.player1))
+    await send_boards(opponent_chat, game, is_player1=(opponent_id == game.player1))
+    
+    # Уведомляем о результате
+    await message.answer(result)
+    
+    if not keep_turn:
+        await bot.send_message(
+            opponent_chat,
+            f"Противник сделал ход: {message.text}\n{result}\nТеперь ваш ход!"
+        )
+    else:
+        await message.answer("Продолжайте ваш ход!")
