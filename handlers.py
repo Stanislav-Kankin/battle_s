@@ -17,15 +17,14 @@ LETTERS = ['а', 'б', 'в', 'г', 'д', 'е', 'ж', 'з', 'и', 'к']
 # ======================
 def format_board(board: list, hide_ships: bool = False) -> str:
     """Форматирует доску в текстовый вид"""
-    # Заголовок с цифрами от 1 до 10
     header = "    " + "   ".join(str(i) for i in range(1, 11)) + "\n"
     board_text = header
 
     for y in range(10):
-        row = [f"{LETTERS[y]} "]  # Буква для строки с пробелом
+        row = [f"{LETTERS[y]} "]  # Буква для строки
         for x in range(10):
             cell = board[y][x]
-            if hide_ships and cell == "🛳️":
+            if hide_ships and cell == "🚤️":
                 row.append("🌊 ")
             else:
                 row.append(f"{cell} ")
@@ -49,9 +48,8 @@ async def send_boards(chat_id: int, game: Game, is_player1: bool):
         "Ваш ход! Введите координаты в формате <b>буква цифра</b> (например, 'а 1' или 'в 5')"
     )
 
-def check_ship_sunk(board: list, x: int, y: int) -> bool:
-    """Проверяет, полностью ли уничтожен корабль"""
-    # Проверяем все клетки вокруг, чтобы найти весь корабль
+def get_ship_cells(board: list, x: int, y: int) -> list:
+    """Возвращает все клетки корабля по одной из его клеток"""
     directions = [(0, 1), (1, 0), (0, -1), (-1, 0)]
     ship_cells = []
     to_check = [(x, y)]
@@ -65,11 +63,33 @@ def check_ship_sunk(board: list, x: int, y: int) -> bool:
         for dx, dy in directions:
             nx, ny = cx + dx, cy + dy
             if 0 <= nx < 10 and 0 <= ny < 10:
-                if board[ny][nx] in ("🛳️", "💥") and (nx, ny) not in ship_cells:
+                if board[ny][nx] in ("🚤️", "💥") and (nx, ny) not in ship_cells:
                     to_check.append((nx, ny))
     
-    # Если все клетки корабля подбиты
-    return all(board[cy][cx] == "💥" for cx, cy in ship_cells)
+    return ship_cells
+
+def mark_around_sunk_ship(board: list, ship_cells: list):
+    """Помечает клетки вокруг уничтоженного корабля"""
+    directions = [(-1, -1), (-1, 0), (-1, 1),
+                  (0, -1),           (0, 1),
+                  (1, -1),  (1, 0), (1, 1)]
+    
+    for x, y in ship_cells:
+        for dx, dy in directions:
+            nx, ny = x + dx, y + dy
+            if 0 <= nx < 10 and 0 <= ny < 10:
+                if board[ny][nx] == "🌊":
+                    board[ny][nx] = "❌"
+
+def check_ship_sunk(board: list, x: int, y: int) -> bool:
+    """Проверяет, полностью ли уничтожен корабль и помечает вокруг"""
+    ship_cells = get_ship_cells(board, x, y)
+    is_sunk = all(board[cy][cx] == "💥" for cx, cy in ship_cells)
+    
+    if is_sunk:
+        mark_around_sunk_ship(board, ship_cells)
+    
+    return is_sunk
 
 # ======================
 # Обработчики команд
@@ -200,7 +220,7 @@ async def process_shot(message: Message):
 
     # Обрабатываем выстрел
     shots.add((x, y))
-    if target_board[y][x] == "🛳️":
+    if target_board[y][x] == "🚤️":
         target_board[y][x] = "💥"
         result = "Попадание! 🔥"
 
